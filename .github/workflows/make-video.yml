@@ -1,0 +1,103 @@
+name: 動画を自動生成
+
+on:
+  workflow_dispatch:
+    inputs:
+      theme:
+        description: "動画テーマ（空欄ならAIにおまかせ）"
+        required: false
+        default: ""
+      format:
+        description: "形式  test=約25秒テスト / shorts60=約60秒Shorts / normal3=約3分横型 / normal8=約8分横型"
+        type: choice
+        default: test
+        options: [test, shorts60, normal3, normal8]
+      genre:
+        description: "ジャンル"
+        type: choice
+        default: 雑学・科学
+        options: [雑学・科学, お金・節約, テクノロジー, 歴史, 心理学・習慣, 健康・生活]
+      voice:
+        description: "声  zundamon=ずんだもん / metan=四国めたん / tsumugi=春日部つむぎ / ryusei=青山龍星(男性)"
+        type: choice
+        default: zundamon
+        options: [zundamon, metan, tsumugi, ryusei]
+      quality:
+        description: "画質  draft=低画質で高速テスト / hd=本番(1080p)"
+        type: choice
+        default: hd
+        options: [hd, draft]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: make-video
+  cancel-in-progress: false
+
+jobs:
+  make:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      voicevox:
+        image: voicevox/voicevox_engine:cpu-latest
+        ports: ["50021:50021"]
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: 準備（プログラムを読み込み）
+        uses: actions/checkout@v4
+
+      - name: 準備（日本語フォント・FFmpeg）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends fonts-noto-cjk ffmpeg > /dev/null
+
+      - name: 準備（Python）
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 準備（ライブラリ）
+        run: pip install -q numpy Pillow edge-tts gTTS
+
+      - name: STEP1 企画
+        run: python generate.py plan --theme "$THEME" --format "${{ inputs.format }}" --genre "${{ inputs.genre }}" --voice "${{ inputs.voice }}" --quality "${{ inputs.quality }}"
+        env:
+          THEME: ${{ inputs.theme }}
+
+      - name: STEP2 台本
+        run: python generate.py script
+
+      - name: STEP3 ナレーション
+        run: python generate.py voice --voice "${{ inputs.voice }}"
+
+      - name: STEP4 図解スライド
+        run: python generate.py visuals
+
+      - name: STEP5-6 編集・MP4書き出し
+        run: python generate.py edit --quality "${{ inputs.quality }}"
+
+      - name: STEP7 タイトル・説明文・サムネ・字幕
+        run: python generate.py package
+
+      - name: 完成品を「Releases」に保存
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="video-$(TZ=Asia/Tokyo date +%Y%m%d-%H%M%S)"
+          gh release create "$TAG" \
+            output/video.mp4 output/thumbnail.jpg output/subtitles.srt output/metadata.md output/rights.md output/script.json \
+            --title "$(cat output/release_title.txt)" --notes-file output/metadata.md
+          echo "## ✅ 完成しました" >> "$GITHUB_STEP_SUMMARY"
+          echo "画面上部の **Code** → 右側の **Releases** から video.mp4 をダウンロードできます。" >> "$GITHUB_STEP_SUMMARY"
+          echo "直接リンク: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 失敗したときの案内
+        if: failure()
+        run: |
+          echo "## ❌ 生成に失敗しました" >> "$GITHUB_STEP_SUMMARY"
+          echo "赤い×がついた工程が原因です。もう一度 **Run workflow** を押すと多くの場合は直ります。" >> "$GITHUB_STEP_SUMMARY"
+          echo "直らない場合は、この画面のスクリーンショットをClaudeに送ってください。" >> "$GITHUB_STEP_SUMMARY"
